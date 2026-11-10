@@ -1,0 +1,42 @@
+name: ssh-deploy
+description: Run a bash script on a remote host over SSH, verifying the host key.
+
+inputs:
+  host:
+    description: Remote hostname or IP.
+    required: true
+  port:
+    description: Remote SSH port.
+    required: false
+    default: "22"
+  user:
+    description: Remote user.
+    required: true
+  key:
+    description: Private key for the remote user.
+    required: true
+  host-key:
+    description: The host's public key as "<type> <base64>", for example "ssh-ed25519 AAAA…".
+    required: true
+  envs:
+    description: Comma-separated names of step env variables to export into the remote script.
+    required: false
+    default: ""
+  script:
+    description: Bash script to run on the remote host. It runs under `set -e` with stdin from /dev/null.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run script over SSH
+      shell: bash
+      env:
+        SSH_DEPLOY_HOST: ${{ inputs.host }}
+        SSH_DEPLOY_PORT: ${{ inputs.port }}
+        SSH_DEPLOY_USER: ${{ inputs.user }}
+        SSH_DEPLOY_KEY: ${{ inputs.key }}
+        SSH_DEPLOY_HOST_KEY: ${{ inputs.host-key }}
+        SSH_DEPLOY_ENVS: ${{ inputs.envs }}
+        SSH_DEPLOY_SCRIPT: ${{ inputs.script }}
+      run: '"$GITHUB_ACTION_PATH/ssh-deploy.sh"'
