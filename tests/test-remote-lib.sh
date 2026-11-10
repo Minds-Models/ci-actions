@@ -2,7 +2,7 @@
 # Tests for ssh-deploy/remote-lib.sh against throwaway local containers (needs Docker).
 set -uo pipefail
 
-# shellcheck source=../ssh-deploy/remote-lib.sh
+# shellcheck source-path=SCRIPTDIR source=../ssh-deploy/remote-lib.sh
 . "$(cd "$(dirname "$0")/.." && pwd)/ssh-deploy/remote-lib.sh"
 
 image='ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852'
