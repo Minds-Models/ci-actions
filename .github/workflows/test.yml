@@ -1,0 +1,53 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ssh-deploy:
+    name: ssh-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Start sshd
+        run: tests/sshd-up.sh "$RUNNER_TEMP"
+
+      - name: Script tests
+        run: tests/test-ssh-deploy.sh "$RUNNER_TEMP"
+
+      - name: Expose throwaway test keys
+        id: keys
+        run: |
+          {
+            echo 'key<<KEY_EOF'
+            cat "$RUNNER_TEMP/client"
+            echo 'KEY_EOF'
+            echo "host-key=$(cut -d' ' -f1,2 "$RUNNER_TEMP/host.pub")"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Action wiring
+        uses: $/ssh-deploy
+        env:
+          GREETING: hello from the runner
+        with:
+          host: 127.0.0.1
+          port: "2222"
+          user: deploy
+          key: ${{ steps.keys.outputs.key }}
+          host-key: ${{ steps.keys.outputs.host-key }}
+          envs: GREETING
+          script: |
+            test "$GREETING" = "hello from the runner"
+            echo "action wiring ok"
