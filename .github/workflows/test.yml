@@ -27,6 +27,9 @@ jobs:
       - name: Script tests
         run: tests/test-ssh-deploy.sh "$RUNNER_TEMP"
 
+      - name: wait_healthy tests
+        run: tests/test-remote-lib.sh
+
       - name: Expose throwaway test keys
         id: keys
         run: |

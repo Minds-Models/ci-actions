@@ -70,6 +70,56 @@ check "invalid env name is rejected" grep -q "invalid env name 'BAD-NAME'" <<<"$
 SSH_DEPLOY_HOST_KEY="" run 'echo connected'
 check "empty input is rejected" grep -q "SSH_DEPLOY_HOST_KEY is empty" <<<"$out"
 
+# `envs: |` in YAML yields one name per line.
+export LINE_A=a LINE_B=b LINE_C=c
+# shellcheck disable=SC2016 # Expands on the remote host.
+SSH_DEPLOY_ENVS=$'LINE_A,LINE_B\nLINE_C\n' run 'printf "%s%s%s" "$LINE_A" "$LINE_B" "$LINE_C"'
+check "multi-line envs exports every name" test "$rc" = 0 -a "$out" = "abc"
+
+SSH_DEPLOY_ENVS="LINE_A, LINE B" run 'echo connected'
+check "env name with inner whitespace is rejected" grep -q "invalid env name 'LINE B'" <<<"$out"
+
+SSH_DEPLOY_ENVS="SSH_DEPLOY_KEY" run 'echo connected'
+check "SSH_DEPLOY_* names are refused" grep -q "reserved env name 'SSH_DEPLOY_KEY'" <<<"$out"
+
+# Names that a naive implementation uses internally must still carry the step's value.
+export name=n1 payload=p1 workdir=w1 input=i1 known_host=k1
+# shellcheck disable=SC2016 # Expands on the remote host.
+SSH_DEPLOY_ENVS="name,payload,workdir,input,known_host" run 'printf "%s" "$name$payload$workdir$input$known_host"'
+check "env names do not collide with the action's own variables" test "$rc" = 0 -a "$out" = "n1p1w1i1k1"
+
+SSH_DEPLOY_HOST_KEY="$wrong_key"$'\n'"* $SSH_DEPLOY_HOST_KEY" run 'echo connected'
+check "multi-line host-key is rejected" grep -q "host-key must be one line" <<<"$out"
+
+SSH_DEPLOY_PORT="22a" run 'echo connected'
+check "non-numeric port is rejected" grep -q "invalid port '22a'" <<<"$out"
+
+SSH_DEPLOY_PORT="02222" run 'echo port-ok'
+check "zero-padded port is normalised" test "$rc" = 0 -a "$out" = "port-ok"
+
+SSH_DEPLOY_USER="-oProxyCommand=id" run 'echo connected'
+check "user starting with '-' is rejected" grep -q "invalid user" <<<"$out"
+
+SSH_DEPLOY_HOST="-oProxyCommand=id" run 'echo connected'
+check "host starting with '-' is rejected" grep -q "invalid host" <<<"$out"
+
+# A user-level ssh config must not be able to supply its own host key. ssh reads
+# the config from the passwd home, so this runs only on a throwaway CI runner.
+if [[ "${CI:-}" == true ]]; then
+  ssh_config="$(getent passwd "$(id -u)" | cut -d: -f6)/.ssh/config"
+  [[ ! -e "$ssh_config" ]] || { echo "refusing to overwrite $ssh_config"; exit 1; }
+  mkdir -p "$(dirname "$ssh_config")"
+  printf 'Host *\n  KnownHostsCommand /bin/echo [127.0.0.1]:2222 %s\n' "$SSH_DEPLOY_HOST_KEY" >"$ssh_config"
+  SSH_DEPLOY_HOST_KEY="$wrong_key" run 'echo connected'
+  check "ssh config cannot override the pinned host key" test "$rc" != 0 -a "${out/connected/}" = "$out"
+  rm -f "$ssh_config"
+else
+  echo "skip  ssh config cannot override the pinned host key (CI only)"
+fi
+
+run 'type -t wait_healthy'
+check "remote script gets the wait_healthy helper" test "$rc" = 0 -a "$out" = "function"
+
 if ((failures)); then
   echo "$failures test(s) failed"
   exit 1
