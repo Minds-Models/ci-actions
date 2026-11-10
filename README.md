@@ -1,6 +1,6 @@
 # ci-actions
 
-Shared GitHub Actions code for the Minds-Models org. Private; other org repos reach it through the repo's Actions access setting ("Accessible from repositories in the Minds-Models organization").
+Shared GitHub Actions code for the Minds-Models org.
 
 ## `ssh-deploy` (composite action)
 
