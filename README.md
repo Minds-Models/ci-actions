@@ -4,23 +4,21 @@ Shared GitHub Actions code for the Minds-Models org.
 
 ## `ssh-deploy` (composite action)
 
-Runs a bash script on a remote host over SSH. Server deploys use it to run their remote deploy script on the VPS.
+Asks the deploy gate on a remote host to deploy one commit. The host binds the key to a forced command (`command="… <repo>"` in `authorized_keys`), so the key cannot run anything else. The gate decides what a deploy does; this action only names the environment and the commit, and hands over the variables the gate expects.
 
 ```yaml
 - name: Deploy
-  uses: Minds-Models/ci-actions/ssh-deploy@<sha> # v1.0.0
+  uses: Minds-Models/ci-actions/ssh-deploy@<sha> # v2.0.0
   env:
     APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
-    DEPLOY_SHA: ${{ github.sha }}
   with:
     host: ${{ secrets.SSH_HOST }}
     user: ${{ secrets.SSH_USER }}
-    key: ${{ secrets.SSH_PRIVATE_KEY }}
+    key: ${{ secrets.DEPLOY_GATE_KEY }}
     host-key: ${{ vars.SSH_HOST_KEY }}
-    envs: APP_PASSWORD,DEPLOY_SHA
-    script: |
-      cd /srv/app
-      git checkout "$DEPLOY_SHA"
+    environment: production
+    sha: ${{ github.sha }}
+    envs: APP_PASSWORD
 ```
 
 | Input | Required | Meaning |
@@ -28,24 +26,17 @@ Runs a bash script on a remote host over SSH. Server deploys use it to run their
 | `host` | yes | Remote hostname or IP |
 | `port` | no (`22`) | Remote SSH port |
 | `user` | yes | Remote user |
-| `key` | yes | Private key |
+| `key` | yes | Private key, bound on the host to the gate |
 | `host-key` | yes | Host public key `"<type> <base64>"`, e.g. the first two fields of `/etc/ssh/ssh_host_ed25519_key.pub`. A mismatch fails the step. |
-| `envs` | no | Names of step `env:` variables exported into the remote script, separated by commas or newlines. `SSH_DEPLOY_*` and `_sd_*` names are refused. |
-| `script` | yes | Bash script; runs under `set -e` with stdin from `/dev/null` |
+| `environment` | yes | Environment name, `^[a-z][a-z0-9-]*$` |
+| `sha` | yes | Full 40-character lowercase commit sha |
+| `envs` | no | Names of step `env:` variables sent to the gate, separated by commas or newlines. `SSH_DEPLOY_*` and `_sd_*` names are refused. |
 
-- The script runs as `bash -se` on the remote host. Values listed in `envs` are sent inside the script on stdin, so they never appear in a process list.
-- Write `"$VAR"`, never `${{ … }}`, inside `script`. Expressions there are template injection.
-- A name in `envs` that is not set on the step fails before connecting. So do a `host`, `user` or `port` that is not a plain value, and a `host-key` that is not one `<type> <base64>` line.
+- The SSH command is `"<environment> <sha>"`; the host reads it from `SSH_ORIGINAL_COMMAND`.
+- The variables travel as one JSON object on stdin, built by `jq` from the environment, so no value appears in argv on either host. `GITHUB_ACTOR`, `GITHUB_RUN_ID` and `GITHUB_REPOSITORY` are added for the gate's audit log.
+- The step fails with the gate's exit code. A name in `envs` that is not set on the step fails before connecting, as do a `host`, `user`, `port`, `environment` or `sha` that is not a plain value, and a `host-key` that is not one `<type> <base64>` line.
 - ssh runs with `-F /dev/null`: no ssh config on the runner can change the host key, proxy or identity.
 - Set `timeout-minutes` on the calling job. The action sets only a 30 s connect timeout.
-
-### Helpers in the remote script
-
-ssh-deploy defines these functions before the script runs (`ssh-deploy/remote-lib.sh`):
-
-| Function | Behaviour |
-|---|---|
-| `wait_healthy <container> [timeout_s=180]` | Returns once the container's healthcheck reports `healthy`. Fails, printing the last 100 log lines, when the container has no healthcheck, restarts, exits or misses the timeout. A crash-looping container looks "running" between restarts, so check health rather than state. |
 
 ## `zizmor` (reusable workflow)
 
@@ -81,7 +72,6 @@ jobs:
 ```bash
 keys=$(mktemp -d)
 tests/sshd-up.sh "$keys"          # throwaway sshd container on 127.0.0.1:2222 (needs Docker)
-tests/test-ssh-deploy.sh "$keys"
-tests/test-remote-lib.sh          # wait_healthy against local containers
+tests/test-ssh-deploy.sh "$keys"  # needs jq
 docker rm -f ssh-deploy-test
 ```
