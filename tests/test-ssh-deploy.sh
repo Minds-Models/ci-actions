@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end tests for ssh-deploy.sh against the sshd from tests/sshd-up.sh.
+# End-to-end tests for ssh-deploy.sh against the sshd from tests/sshd-up.sh,
+# whose key runs tests/fake-gate.sh. Needs jq.
 # Usage: tests/test-ssh-deploy.sh <keydir>
 set -uo pipefail
 
@@ -13,15 +14,23 @@ SSH_DEPLOY_KEY="$(cat "$keydir/client")"
 export SSH_DEPLOY_KEY
 SSH_DEPLOY_HOST_KEY="$(cut -d' ' -f1,2 "$keydir/host.pub")"
 export SSH_DEPLOY_HOST_KEY
+export SSH_DEPLOY_ENVIRONMENT=production
+export SSH_DEPLOY_SHA=0123456789abcdef0123456789abcdef01234567
 export SSH_DEPLOY_ENVS=""
+unset GITHUB_ACTOR GITHUB_RUN_ID GITHUB_REPOSITORY
 
 failures=0
 out=""
 rc=0
 
 run() {
-  out="$(SSH_DEPLOY_SCRIPT="$1" "$deploy" 2>&1)"
+  out="$("$deploy" 2>&1)"
   rc=$?
+}
+
+# The JSON the fake gate received.
+payload() {
+  sed -n 's/^PAYLOAD=//p' <<<"$out"
 }
 
 check() {
@@ -36,71 +45,72 @@ check() {
   fi
 }
 
+run
+check "the gate gets '<environment> <sha>' as the command" grep -qx "CMD=production $SSH_DEPLOY_SHA" <<<"$out"
+check "no envs sends an empty object" test "$rc" = 0 -a "$(payload)" = "{}"
+
 # Quotes, expansions, backslashes and newlines must arrive byte-for-byte.
 export TRICKY=$'it\'s "quoted" $HOME `id` $(id) \\ ; & | *\nsecond line\t tab'
 export EMPTY=""
-# shellcheck disable=SC2016 # Expands on the remote host.
-SSH_DEPLOY_ENVS=" TRICKY , EMPTY " run 'printf "%s|[%s]" "$TRICKY" "$EMPTY"'
-check "env values round-trip exactly" test "$rc" = 0 -a "$out" = "$TRICKY|[]"
+SSH_DEPLOY_ENVS=" TRICKY , EMPTY " run
+check "env values round-trip exactly as JSON" test "$rc" = 0 -a "$(payload | jq -r .TRICKY)" = "$TRICKY"
+check "empty values are sent" test "$(payload | jq -c .)" = "$(jq -cn --arg t "$TRICKY" '{TRICKY: $t, EMPTY: ""}')"
 
-# A command that reads stdin must not swallow the rest of the script.
-run $'cat\necho after-cat'
-check "stdin readers do not consume the script" test "$rc" = 0 -a "$out" = "after-cat"
+GITHUB_ACTOR=octocat GITHUB_RUN_ID=42 run
+check "GitHub metadata rides along for the audit log" test "$(payload | jq -r '.GITHUB_ACTOR + "/" + .GITHUB_RUN_ID')" = "octocat/42"
 
-run $'false\necho unreachable'
-check "set -e stops at the first failure" test "$rc" != 0 -a "${out/unreachable/}" = "$out"
-
-run 'exit 7'
-check "remote exit code propagates" test "$rc" = 7
-
-run $'cat <<EOF\nheredoc ${SSH_DEPLOY_PORT:-unset}\nEOF'
-check "heredocs work and runner-only vars stay local" test "$rc" = 0 -a "$out" = "heredoc unset"
-
-wrong_key="$(ssh-keygen -q -t ed25519 -N '' -f "$keydir/wrong" <<<y >/dev/null 2>&1; cut -d' ' -f1,2 "$keydir/wrong.pub")"
-SSH_DEPLOY_HOST_KEY="$wrong_key" run 'echo connected'
-check "wrong host key is refused" test "$rc" != 0 -a "${out/connected/}" = "$out"
-
-unset NOT_SET
-SSH_DEPLOY_ENVS="NOT_SET" run 'echo connected'
-check "unset env name fails before connecting" grep -q "NOT_SET' is listed in envs but not set" <<<"$out"
-
-SSH_DEPLOY_ENVS="BAD-NAME" run 'echo connected'
-check "invalid env name is rejected" grep -q "invalid env name 'BAD-NAME'" <<<"$out"
-
-SSH_DEPLOY_HOST_KEY="" run 'echo connected'
-check "empty input is rejected" grep -q "SSH_DEPLOY_HOST_KEY is empty" <<<"$out"
+export EXIT_CODE=7
+SSH_DEPLOY_ENVS="EXIT_CODE" run
+check "the gate's exit code propagates" test "$rc" = 7
 
 # `envs: |` in YAML yields one name per line.
 export LINE_A=a LINE_B=b LINE_C=c
-# shellcheck disable=SC2016 # Expands on the remote host.
-SSH_DEPLOY_ENVS=$'LINE_A,LINE_B\nLINE_C\n' run 'printf "%s%s%s" "$LINE_A" "$LINE_B" "$LINE_C"'
-check "multi-line envs exports every name" test "$rc" = 0 -a "$out" = "abc"
+SSH_DEPLOY_ENVS=$'LINE_A,LINE_B\nLINE_C\n' run
+check "multi-line envs sends every name" test "$rc" = 0 -a "$(payload | jq -r '.LINE_A + .LINE_B + .LINE_C')" = "abc"
 
-SSH_DEPLOY_ENVS="LINE_A, LINE B" run 'echo connected'
+wrong_key="$(ssh-keygen -q -t ed25519 -N '' -f "$keydir/wrong" <<<y >/dev/null 2>&1; cut -d' ' -f1,2 "$keydir/wrong.pub")"
+SSH_DEPLOY_HOST_KEY="$wrong_key" run
+check "wrong host key is refused" test "$rc" != 0 -a "${out/CMD=/}" = "$out"
+
+unset NOT_SET
+SSH_DEPLOY_ENVS="NOT_SET" run
+check "unset env name fails before connecting" grep -q "NOT_SET' is listed in envs but not set" <<<"$out"
+
+SSH_DEPLOY_ENVS="BAD-NAME" run
+check "invalid env name is rejected" grep -q "invalid env name 'BAD-NAME'" <<<"$out"
+
+SSH_DEPLOY_ENVS="LINE_A, LINE B" run
 check "env name with inner whitespace is rejected" grep -q "invalid env name 'LINE B'" <<<"$out"
 
-SSH_DEPLOY_ENVS="SSH_DEPLOY_KEY" run 'echo connected'
+SSH_DEPLOY_ENVS="SSH_DEPLOY_KEY" run
 check "SSH_DEPLOY_* names are refused" grep -q "reserved env name 'SSH_DEPLOY_KEY'" <<<"$out"
 
-# Names that a naive implementation uses internally must still carry the step's value.
-export name=n1 payload=p1 workdir=w1 input=i1 known_host=k1
-# shellcheck disable=SC2016 # Expands on the remote host.
-SSH_DEPLOY_ENVS="name,payload,workdir,input,known_host" run 'printf "%s" "$name$payload$workdir$input$known_host"'
-check "env names do not collide with the action's own variables" test "$rc" = 0 -a "$out" = "n1p1w1i1k1"
+SSH_DEPLOY_HOST_KEY="" run
+check "empty input is rejected" grep -q "SSH_DEPLOY_HOST_KEY is empty" <<<"$out"
 
-SSH_DEPLOY_HOST_KEY="$wrong_key"$'\n'"* $SSH_DEPLOY_HOST_KEY" run 'echo connected'
+for bad in "Production" "prod;id" "-x" "prod uction"; do
+  SSH_DEPLOY_ENVIRONMENT="$bad" run
+  check "environment '$bad' is rejected" grep -q "invalid environment" <<<"$out"
+done
+
+for bad in "0123456" "0123456789ABCDEF0123456789ABCDEF01234567" "0123456789abcdef0123456789abcdef01234567 x"; do
+  SSH_DEPLOY_SHA="$bad" run
+  check "sha '$bad' is rejected" grep -q "sha must be 40 lowercase hex characters" <<<"$out"
+done
+
+SSH_DEPLOY_HOST_KEY="$wrong_key"$'\n'"* $SSH_DEPLOY_HOST_KEY" run
 check "multi-line host-key is rejected" grep -q "host-key must be one line" <<<"$out"
 
-SSH_DEPLOY_PORT="22a" run 'echo connected'
+SSH_DEPLOY_PORT="22a" run
 check "non-numeric port is rejected" grep -q "invalid port '22a'" <<<"$out"
 
-SSH_DEPLOY_PORT="02222" run 'echo port-ok'
-check "zero-padded port is normalised" test "$rc" = 0 -a "$out" = "port-ok"
+SSH_DEPLOY_PORT="02222" run
+check "zero-padded port is normalised" test "$rc" = 0
 
-SSH_DEPLOY_USER="-oProxyCommand=id" run 'echo connected'
+SSH_DEPLOY_USER="-oProxyCommand=id" run
 check "user starting with '-' is rejected" grep -q "invalid user" <<<"$out"
 
-SSH_DEPLOY_HOST="-oProxyCommand=id" run 'echo connected'
+SSH_DEPLOY_HOST="-oProxyCommand=id" run
 check "host starting with '-' is rejected" grep -q "invalid host" <<<"$out"
 
 # A user-level ssh config must not be able to supply its own host key. ssh reads
@@ -110,15 +120,12 @@ if [[ "${CI:-}" == true ]]; then
   [[ ! -e "$ssh_config" ]] || { echo "refusing to overwrite $ssh_config"; exit 1; }
   mkdir -p "$(dirname "$ssh_config")"
   printf 'Host *\n  KnownHostsCommand /bin/echo [127.0.0.1]:2222 %s\n' "$SSH_DEPLOY_HOST_KEY" >"$ssh_config"
-  SSH_DEPLOY_HOST_KEY="$wrong_key" run 'echo connected'
-  check "ssh config cannot override the pinned host key" test "$rc" != 0 -a "${out/connected/}" = "$out"
+  SSH_DEPLOY_HOST_KEY="$wrong_key" run
+  check "ssh config cannot override the pinned host key" test "$rc" != 0 -a "${out/CMD=/}" = "$out"
   rm -f "$ssh_config"
 else
   echo "skip  ssh config cannot override the pinned host key (CI only)"
 fi
-
-run 'type -t wait_healthy'
-check "remote script gets the wait_healthy helper" test "$rc" = 0 -a "$out" = "function"
 
 if ((failures)); then
   echo "$failures test(s) failed"
